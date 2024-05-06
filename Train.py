@@ -1,170 +1,268 @@
-import os.path
+import os
 import numpy as np
 import pandas as pd
-import cv2
-from PIL import Image
-import torch
-import torchvision.models
-from sklearn.metrics import cohen_kappa_score
-from sklearn.metrics import accuracy_score
-from torchvision.datasets import ImageFolder
-from torchvision.transforms import transforms
-from torch.utils.data import Dataset, DataLoader
-from torch.optim import Adam
-from torch.optim.lr_scheduler import StepLR
-import random
+import matplotlib.pyplot as plt
+# from keras.src.applications import InceptionV3
+# from keras.src.applications.mobilenet_v3 import MobileNetV3
+from sklearn.utils import class_weight
+# from tensorflow.keras.applications import MobileNetV2
+# from tensorflow.keras.applications import VGG16
+# from tensorflow.keras.models import Model
+# from tensorflow.keras.layers import Dense, GlobalAveragePooling2D
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.optimizers import Adam
+from keras.models import load_model
+from sklearn.model_selection import train_test_split
+# from tensorflow.keras.applications import MobileNetV2, VGG16, ResNet50, InceptionV3, Xception
+# from sklearn.metrics import cohen_kappa_score
 
 
-def read_images(image_path, label_path):
-    images = [[], [], []]
-    label_pd = pd.read_csv(label_path)
-    for _, row in label_pd.iterrows():
-        name, label = row['image name'], row['image quality level']
-        label = int(label)
-        image_file = os.path.join(image_path, name)
-        image = Image.open(image_file)
-        images[label].append(image)
-    print(len(images[0]), len(images[1]), len(images[2]))
-    return images
+# 加载模型
+model = load_model('best_model.h5')
+
+# 配置参数
+train_image_folder_path = 'Training Set'  # 训练集图片文件夹路径
+train_csv_path = 'DRAC2022_ Image Quality Assessment_Training Labels.csv'  # 训练集标签CSV文件路径
+test_image_folder_path = 'Testing Set'  # 测试集图片文件夹路径
+img_width, img_height = 224, 224
+batch_size0 = 5
+batch_size1 = 10
+batch_size2 = 52
+batch_size = batch_size0 + batch_size1 + batch_size2  # 批量大小
+epochs = 20  # 训练轮数
+
+# 读取训练集标签CSV文件
+train_labels = pd.read_csv(train_csv_path, dtype=str)
+# train_labels['image name'] = train_labels['image name'].apply(lambda x1: x1) #  train_image_folder_path + '/' +
+
+# train_labels 是所有训练数据的DataFrame
+train_labels, valid_labels = train_test_split(train_labels, test_size=0.2,
+                                              stratify=train_labels['image quality level'], random_state=42)
+print(train_labels.shape, valid_labels.shape)
+print(train_labels.iloc[0, 0])
+
+# 指定所有可能的类别标签
+classes = ['0', '1', '2']
+
+# 类别为2的图像数据生成器
+datagen_2_augmentation = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    horizontal_flip=True,
+    fill_mode='wrap'
+)
+
+# 类别为1的图像数据生成器
+datagen_1_augmentation = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    horizontal_flip=True,
+    fill_mode='wrap'
+)
+
+# 类别为0的图像数据生成器
+datagen_0_augmentation = ImageDataGenerator(
+    rescale=1./255,
+    rotation_range=20,
+    width_shift_range=0.2,
+    height_shift_range=0.2,
+    horizontal_flip=True,
+    fill_mode='wrap'
+)
+
+mult11, mult01 = 5, 10
+# 创建分开的生成器
+train_generator_2_aug = datagen_2_augmentation.flow_from_dataframe(
+    dataframe=train_labels[train_labels['image quality level'] == '2'],
+    directory=train_image_folder_path,
+    x_col='image name',
+    y_col='image quality level',
+    target_size=(img_width, img_height),
+    batch_size=batch_size2,
+    class_mode='categorical',
+    classes=classes,  # 指定所有类别
+    shuffle=True
+)
+
+train_generator_1_augs = []
+for _ in range(mult11):
+    train_generator_1_aug = datagen_1_augmentation.flow_from_dataframe(
+        dataframe=train_labels[train_labels['image quality level'] == '1'],
+        directory=train_image_folder_path,
+        x_col='image name',
+        y_col='image quality level',
+        target_size=(img_width, img_height),
+        batch_size=batch_size1,
+        class_mode='categorical',
+        classes=classes,  # 指定所有类别
+        shuffle=True
+    )
+    train_generator_1_augs.append(train_generator_1_aug)
+
+train_generator_0_augs = []
+for _ in range(mult01):
+    train_generator_0_aug = datagen_0_augmentation.flow_from_dataframe(
+        dataframe=train_labels[train_labels['image quality level'] == '0'],
+        directory=train_image_folder_path,
+        x_col='image name',
+        y_col='image quality level',
+        target_size=(img_width, img_height),
+        batch_size=batch_size0,
+        class_mode='categorical',
+        classes=classes,  # 指定所有类别
+        shuffle=True
+    )
+    train_generator_0_augs.append(train_generator_0_aug)
 
 
-def mix_up(image1, image2, label1, label2, alpha=0.5):
-    lam = lam = np.random.beta(alpha, alpha)
-    if label1 == label2:
-        mixed_image = Image.blend(image1, image2, alpha)
-        return [mixed_image, label1]
+def mixed_generator(gen2, gen1, gen0, mult2=1, mult1=5, mult0=10):
+    while True:
+        # x1, y1 = gen2.next()
+        # x1_list, y1_list = [x1], [y1]  # 类别2不进行额外增强
 
-    while 0.3 < lam < 0.7:
-        lam = np.random.beta(alpha, alpha)
-    mixed_image = Image.blend(image1, image2, alpha)
-    label = label2 if lam <= 0.3 else label1
-    return [mixed_image, label]
+        # 类别2增强
+        x2, y2 = gen2.next()
+        x1_list, y1_list = [x2], [y2]
+        for i in range(mult2 - 1):  # 已有1次, 需要额外增强
+            x_temp, y_temp = gen2[i].next()
+            x1_list.append(x_temp)
+            y1_list.append(y_temp)
 
+        # 类别1增强2倍
+        for i in range(mult1 - 1):
+            x_temp, y_temp = gen1[i].next()
+            x1_list.append(x_temp)
+            y1_list.append(y_temp)
 
-def mix_up_gen(images, prob, num):
-    image_labels_ = []
-    for _ in range(num):
-        r1 = np.random.choice([0, 1, 2], p=prob)
-        r2 = np.random.choice([0, 1, 2], p=prob)
-        image1 = random.choice(images[r1])
-        image2 = random.choice(images[r2])
-        image_labels_.append(mix_up(image1, image2, r1, r2))
-    return image_labels_
+        # 类别0增强5倍
+        for i in range(mult0 - 1):
+            x_temp, y_temp = gen0[i].next()
+            x1_list.append(x_temp)
+            y1_list.append(y_temp)
 
-
-def merge_images(images_origin, image_labels_gen):
-    image_labels_ = []
-    for image in images_origin[0]:
-        image_labels_.append([image, 0])
-    for image in images_origin[1]:
-        image_labels_.append([image, 1])
-    for image in images_origin[2]:
-        image_labels_.append([image, 2])
-    for image_label in image_labels_gen:
-        image_labels_.append(image_label)
-    return image_labels_
+        x_combined = np.concatenate(x1_list, axis=0)
+        y_combined = np.concatenate(y1_list, axis=0)
+        indices = np.arange(len(x_combined))
+        np.random.shuffle(indices)
+        yield x_combined[indices], y_combined[indices]
 
 
-# DataSet applying augmentation
-class MyDataSet(Dataset):
-    def __init__(self, img_height, img_weight, image_labels):
-        self.image_labels = image_labels
-        self.img_height, self.img_weight = img_height, img_weight
+# 合并后的训练生成器
+train_generator = mixed_generator(train_generator_2_aug, train_generator_1_augs, train_generator_0_augs)
 
-    def __len__(self):
-        return len(self.image_labels)
+# 验证集
+valid_datagen = ImageDataGenerator(rescale=1./255)
 
-    def __getitem__(self, idx):
-        image, label = self.image_labels[idx]
-        image = image.convert('RGB')
+valid_generator = valid_datagen.flow_from_dataframe(
+    dataframe=valid_labels,
+    directory=train_image_folder_path,
+    x_col='image name',
+    y_col='image quality level',
+    target_size=(img_width, img_height),
+    batch_size=batch_size,
+    class_mode='categorical',
+    classes=classes,
+    shuffle=False
+)
 
-        transform = transforms.Compose(
-            [
-                transforms.Resize((self.img_height, self.img_weight)),
-                transforms.RandomHorizontalFlip(),
-                transforms.RandomVerticalFlip(),
-                transforms.RandomRotation(30),
-                transforms.ColorJitter(brightness=0.2, contrast=0.4),
-                transforms.ToTensor()
-            ]
-        )
-        image = transform(image)
+# 测试集数据生成器
+test_datagen = ImageDataGenerator(rescale=1./255)
 
-        return image, label
+test_images = pd.DataFrame({'image name': os.listdir(test_image_folder_path)})
+# test_images['image name'] = test_images['image name'].apply(lambda x2: os.path.join(test_image_folder_path, x2))
+
+test_generator = test_datagen.flow_from_dataframe(
+    dataframe=test_images,
+    directory=test_image_folder_path,
+    x_col='image name',
+    y_col=None,
+    target_size=(img_width, img_height),
+    batch_size=batch_size,
+    class_mode=None,
+    shuffle=False
+)
+'''
+# 创建预训练模型
+base_model = VGG16(weights='imagenet', include_top=False, input_shape=(img_width, img_height, 3))
+
+# 冻结预训练模型的权重
+for layer in base_model.layers:
+    layer.trainable = False
+
+# 添加自定义层
+x = base_model.output
+x = GlobalAveragePooling2D()(x)
+x = Dense(1024, activation='relu')(x)
+predictions = Dense(3, activation='softmax')(x)  # 3个质量等级
+
+# 构建完整模型
+model = Model(inputs=base_model.input, outputs=predictions)
+'''
+# 编译模型
+model.compile(optimizer=Adam(learning_rate=0.0001), loss='categorical_crossentropy', metrics=['accuracy', 'AUC'])
+
+# 总训练数据量
+total_train_data = len(train_labels[train_labels['image quality level'].isin(['0', '1', '2'])])
+
+# 计算每个 epoch 的步骤数
+steps_per_epoch = total_train_data // batch_size
+
+# 计算验证数据量
+total_valid_data = len(valid_labels)
+
+# 计算验证集每个 epoch 的步骤数
+validation_steps = total_valid_data // batch_size
+
+class_weights = class_weight.compute_class_weight(
+    'balanced',
+    classes=np.unique(train_labels['image quality level']),
+    y=train_labels['image quality level'].values
+)
+class_weights_dict = dict(enumerate(class_weights))
+
+# 训练模型
+history = model.fit_generator(
+    train_generator,
+    epochs=epochs,
+    steps_per_epoch=steps_per_epoch+1,
+    validation_data=valid_generator,
+    validation_steps=validation_steps,
+    verbose=1,
+    class_weight=class_weights_dict
+)
+print(history.history)
+print(history.epoch)
 
 
-# params
-img_height, img_weight = 256, 256
-mix_up_num = 500
-num_classes = 3
-batch_size = 32
-epochs = 12
-weight_decay = 1e-3
-probability = [0.55, 0.4, 0.05]
-image_path = './Training Set'
-label_path = './DRAC2022_ Image Quality Assessment_Training Labels.csv'
-model_path = './VGGMix.pth'
+# 使用模型进行预测
+predictions = model.predict(test_generator, verbose=1)
 
-images = read_images(image_path, label_path)
-new_image_labels = mix_up_gen(images, probability, mix_up_num)
+# 计算最终预测类别
+final_classes = np.argmax(predictions, axis=1)
 
-image_labels = merge_images(images, new_image_labels)
-train_dataset = MyDataSet(img_height, img_weight, image_labels)
-train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-print("Data OK---------------------------------------------------------------")
-model = torchvision.models.vgg16(pretrained=True)
-print(model)
-model.classifier[6] = torch.nn.Linear(in_features=4096, out_features=3, bias=True)
+# 创建最终结果DataFrame
+final_results = pd.DataFrame({
+    'case': [os.path.basename(x) for x in test_generator.filenames],
+    'class': final_classes,
+    'P0': predictions[:, 0],
+    'P1': predictions[:, 1],
+    'P2': predictions[:, 2]
+})
 
-if os.path.exists(model_path):
-    model.load_state_dict(torch.load(model_path))
-for param in model.parameters():
-    param.requires_grad = False
-params = model.classifier[6].parameters()
-for param in params:
-    param.requires_grad = True
 
-device = torch.device('cuda:0')
-model = model.to(device)
-model.cuda()
+# 将最终结果保存到CSV文件
+final_results.to_csv('final_test_quality_predictions.csv', index=False)
 
-optimizer1 = Adam(model.classifier[6].parameters(), lr=1e-4, weight_decay=weight_decay)
-scheduler1 = StepLR(optimizer=optimizer1, step_size=2, gamma=0.8)
-CELoss = torch.nn.CrossEntropyLoss()
+# 绘制训练历史曲线
+plt.plot(history.history['accuracy'])
+plt.title('Model Accuracy')
+plt.ylabel('Accuracy')
+plt.xlabel('Epoch')
+plt.show()
 
-import time
-
-for epoch in range(epochs):
-    print('Epoch:', epoch + 1)
-    start_time = time.time()
-    losses = 0.0
-    pred, label = [], []
-    max_accuracy = 0.0
-    model.train()
-    for inputs, labels in train_loader:
-        inputs = inputs.cuda()
-        labels = labels.cuda()
-
-        outputs = model(inputs)
-        pred = pred + outputs.detach().cpu().numpy().argmax(1).tolist()
-        label = label + labels.detach().cpu().numpy().tolist()
-        loss = CELoss(outputs, labels)
-
-        loss.backward()
-        optimizer1.step()
-        #optimizer2.step()
-        losses += loss.item()
-
-    scheduler1.step()
-    #scheduler2.step()
-    end_time = time.time()
-    print('time:', end_time - start_time)
-    print('avg loss:', losses / 21)
-    avg_accuracy = accuracy_score(pred, label)
-    print('avg accuracy', avg_accuracy)
-    print('avg Kappa', cohen_kappa_score(pred, label, weights='quadratic'))
-    print()
-    if avg_accuracy > max_accuracy:
-        max_accuracy = avg_accuracy
-        torch.save(model.state_dict(), model_path)
-    # store model
+# 保存模型
+#model.save('best_model.h5')  # 保存为 HDF5 文件
